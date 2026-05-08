@@ -41,15 +41,15 @@ echo "─── 配置信息 ───"
 
 # admin 密码（手动输入）
 while true; do
-    read -rp "  admin 密码: " -s ADMIN_PASS; echo ""
-    read -rp "  确认 admin 密码: " -s ADMIN_PASS2; echo ""
+    read -rp "  admin 密码: " -s ADMIN_PASS </dev/tty; echo ""
+    read -rp "  确认 admin 密码: " -s ADMIN_PASS2 </dev/tty; echo ""
     [[ "$ADMIN_PASS" == "$ADMIN_PASS2" && -n "$ADMIN_PASS" ]] && break
     echo "  密码不一致或为空，请重试"
 done
 
 # ci-bot 密码（回车随机，或手动输入）
 _CIBOT_RANDOM=$(openssl rand -base64 24 | tr -d '/+=\n' | head -c 24)
-read -rp "  ci-bot 密码（回车随机生成）: " -s CIBOT_PASS; echo ""
+read -rp "  ci-bot 密码（回车随机生成）: " -s CIBOT_PASS </dev/tty; echo ""
 CIBOT_PASS="${CIBOT_PASS:-$_CIBOT_RANDOM}"
 echo "  ci-bot 密码: $CIBOT_PASS"
 
@@ -57,7 +57,7 @@ echo "  ci-bot 密码: $CIBOT_PASS"
 echo ""
 echo "  请前往 CF Zero Trust → Networks → Tunnels → 你的 tunnel → Configure"
 echo "  复制 token（以 eyJ 开头的长字符串）"
-read -rp "  CF Tunnel Token: " CF_TOKEN
+read -rp "  CF Tunnel Token: " CF_TOKEN </dev/tty
 if [[ -z "$CF_TOKEN" ]]; then
     echo "  ⚠ 未填写 Token，cloudflared 将跳过安装，之后可手动运行"
 fi
