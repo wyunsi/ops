@@ -135,11 +135,17 @@ if [[ -n "$CF_TOKEN" ]]; then
         cloudflare/cloudflared:latest \
         tunnel --no-autoupdate run --token "$CF_TOKEN"
 
-    sleep 3
-    if docker ps --filter "name=cloudflared" --filter "status=running" | grep -q cloudflared; then
+    echo "→ 等待 cloudflared 连接..."
+    sleep 6
+    if docker logs cloudflared 2>&1 | grep -q "Invalid tunnel secret\|not valid\|Unauthorized"; then
+        echo "✖ cloudflared token 无效，请到 CF Zero Trust → Networks → Tunnels 重新复制 token"
+        docker rm -f cloudflared
+        exit 1
+    elif docker ps --filter "name=cloudflared" --filter "status=running" | grep -q cloudflared; then
         echo "✓ Cloudflare Tunnel 已启动"
     else
-        echo "⚠ cloudflared 启动异常，请检查：docker logs cloudflared"
+        echo "⚠ cloudflared 启动异常：docker logs cloudflared"
+        exit 1
     fi
 fi
 
