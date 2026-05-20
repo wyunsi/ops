@@ -34,12 +34,28 @@ if ! command -v docker &>/dev/null; then
 fi
 echo "✓ Docker $(docker --version | awk '{print $3}' | tr -d ',')"
 
-# ── 2. 收集 CF Tunnel Token ──────────────────────────────────────────────────
+# ── 2. 收集 CF Tunnel Token 并提前验证 ──────────────────────────────────────
 echo ""
 echo "请前往 CF Zero Trust → Networks → Tunnels → 你的 tunnel → Configure"
 echo "复制 token（以 eyJ 开头的长字符串）"
 read -rp "CF Tunnel Token（回车跳过）: " CF_TOKEN </dev/tty
 echo ""
+
+if [[ -n "$CF_TOKEN" ]]; then
+    echo "→ 验证 CF Tunnel Token..."
+    docker rm -f _cf_test 2>/dev/null || true
+    docker run -d --name _cf_test --network host \
+        cloudflare/cloudflared:latest \
+        tunnel --no-autoupdate run --token "$CF_TOKEN" >/dev/null
+    sleep 6
+    if docker logs _cf_test 2>&1 | grep -q "Invalid tunnel secret\|not valid\|Unauthorized"; then
+        docker rm -f _cf_test >/dev/null
+        echo "✖ Token 无效，请到 CF Zero Trust → Tunnels 重新复制 token 后再运行此脚本"
+        exit 1
+    fi
+    docker rm -f _cf_test >/dev/null
+    echo "✓ Token 有效"
+fi
 
 # ── 3. 从 CF Worker 拉取公钥证书 ─────────────────────────────────────────────
 mkdir -p "$REGISTRY_DIR/certs"
@@ -79,17 +95,16 @@ auth:
 CONF
 echo "✓ 配置已写入"
 
-# ── 5. Docker 网络 ───────────────────────────────────────────────────────────
+# ── 5. 清理旧容器 ────────────────────────────────────────────────────────────
+echo "→ 清理旧容器..."
+docker rm -f registry registry-ui cloudflared 2>/dev/null || true
+
+# ── 6. Docker 网络 ───────────────────────────────────────────────────────────
 if ! docker network inspect registry-net &>/dev/null; then
     docker network create registry-net
-    echo "✓ 网络 registry-net 已创建"
 fi
 
-# ── 6. Registry 容器 ─────────────────────────────────────────────────────────
-if docker inspect registry &>/dev/null; then
-    docker stop registry && docker rm registry
-fi
-
+# ── 7. Registry 容器 ─────────────────────────────────────────────────────────
 docker run -d \
     --name registry \
     --network registry-net \
@@ -99,14 +114,9 @@ docker run -d \
     -v "$CONFIG_FILE":/etc/docker/registry/config.yml:ro \
     -v "$CERT_FILE":/certs/auth-public.crt:ro \
     registry:2
-
 echo "✓ Registry 已启动（127.0.0.1:5000）"
 
-# ── 7. Registry UI 容器 ──────────────────────────────────────────────────────
-if docker inspect registry-ui &>/dev/null; then
-    docker stop registry-ui && docker rm registry-ui
-fi
-
+# ── 8. Registry UI 容器 ──────────────────────────────────────────────────────
 docker run -d \
     --name registry-ui \
     --network registry-net \
@@ -119,37 +129,20 @@ docker run -d \
     -e DELETE_IMAGES=true \
     -e REGISTRY_SECURED=true \
     joxit/docker-registry-ui:latest
-
 echo "✓ Registry UI 已启动（127.0.0.1:5080）"
 
-# ── 8. Cloudflare Tunnel ─────────────────────────────────────────────────────
+# ── 9. Cloudflare Tunnel ─────────────────────────────────────────────────────
 if [[ -n "$CF_TOKEN" ]]; then
-    if docker inspect cloudflared &>/dev/null; then
-        docker stop cloudflared && docker rm cloudflared
-    fi
-
     docker run -d \
         --name cloudflared \
         --network host \
         --restart always \
         cloudflare/cloudflared:latest \
         tunnel --no-autoupdate run --token "$CF_TOKEN"
-
-    echo "→ 等待 cloudflared 连接..."
-    sleep 6
-    if docker logs cloudflared 2>&1 | grep -q "Invalid tunnel secret\|not valid\|Unauthorized"; then
-        echo "✖ cloudflared token 无效，请到 CF Zero Trust → Networks → Tunnels 重新复制 token"
-        docker rm -f cloudflared
-        exit 1
-    elif docker ps --filter "name=cloudflared" --filter "status=running" | grep -q cloudflared; then
-        echo "✓ Cloudflare Tunnel 已启动"
-    else
-        echo "⚠ cloudflared 启动异常：docker logs cloudflared"
-        exit 1
-    fi
+    echo "✓ Cloudflare Tunnel 已启动"
 fi
 
-# ── 9. 验证 ──────────────────────────────────────────────────────────────────
+# ── 10. 验证 ─────────────────────────────────────────────────────────────────
 sleep 2
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/v2/)
 if [ "$HTTP_CODE" = "401" ]; then
