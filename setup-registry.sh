@@ -4,8 +4,8 @@
 # 前置条件：
 #   1. CF Worker 已部署（npm run setup && npm run deploy）
 #   2. CF Tunnel 已在 CF Zero Trust Dashboard 创建，路由配置：
-#        registry 域名 → http://localhost:5000
-#        UI 域名       → http://localhost:5080
+#        registry 域名  → http://localhost:5000   （对外，Token Auth）
+#        UI 域名        → http://localhost:5080   （内部管理，建议开 CF Access）
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/wyunsi/ops/main/setup-registry.sh | bash
@@ -21,6 +21,7 @@ ISSUER="wyunsi-auth"
 REGISTRY_DIR="$HOME/registry"
 CERT_FILE="$REGISTRY_DIR/certs/auth-public.crt"
 CONFIG_FILE="$REGISTRY_DIR/registry-config.yml"
+CONFIG_RO_FILE="$REGISTRY_DIR/registry-config-ro.yml"
 
 echo "=== 私有 Docker Registry 一键安装 ==="
 echo "  CF Worker : https://$CF_WORKER_DOMAIN"
@@ -34,7 +35,7 @@ if ! command -v docker &>/dev/null; then
 fi
 echo "✓ Docker $(docker --version | awk '{print $3}' | tr -d ',')"
 
-# ── 2. 收集 CF Tunnel Token 并提前验证 ──────────────────────────────────────
+# ── 2. 验证 CF Tunnel Token ──────────────────────────────────────────────────
 echo ""
 echo "请前往 CF Zero Trust → Networks → Tunnels → 你的 tunnel → Configure"
 echo "复制 token（以 eyJ 开头的长字符串）"
@@ -73,8 +74,10 @@ else
     exit 1
 fi
 
-# ── 4. 写 registry-config.yml ────────────────────────────────────────────────
+# ── 4. 写配置文件 ────────────────────────────────────────────────────────────
 echo "→ 写入 Registry 配置..."
+
+# 对外（Token Auth，读写）
 cat > "$CONFIG_FILE" << CONF
 version: 0.1
 log:
@@ -93,18 +96,34 @@ auth:
     issuer: ${ISSUER}
     rootcertbundle: /certs/auth-public.crt
 CONF
+
+# 内部只读（无认证，供 UI 使用）
+cat > "$CONFIG_RO_FILE" << CONF
+version: 0.1
+log:
+  level: warn
+storage:
+  filesystem:
+    rootdirectory: /var/lib/registry
+  maintenance:
+    readonly:
+      enabled: true
+http:
+  addr: :5001
+CONF
+
 echo "✓ 配置已写入"
 
 # ── 5. 清理旧容器 ────────────────────────────────────────────────────────────
 echo "→ 清理旧容器..."
-docker rm -f registry registry-ui cloudflared 2>/dev/null || true
+docker rm -f registry registry-ro registry-ui cloudflared 2>/dev/null || true
 
 # ── 6. Docker 网络 ───────────────────────────────────────────────────────────
 if ! docker network inspect registry-net &>/dev/null; then
     docker network create registry-net
 fi
 
-# ── 7. Registry 容器 ─────────────────────────────────────────────────────────
+# ── 7. Registry（对外，Token Auth）──────────────────────────────────────────
 docker run -d \
     --name registry \
     --network registry-net \
@@ -114,9 +133,20 @@ docker run -d \
     -v "$CONFIG_FILE":/etc/docker/registry/config.yml:ro \
     -v "$CERT_FILE":/certs/auth-public.crt:ro \
     registry:2
-echo "✓ Registry 已启动（127.0.0.1:5000）"
+echo "✓ Registry 已启动（127.0.0.1:5000，Token Auth）"
 
-# ── 8. Registry UI 容器 ──────────────────────────────────────────────────────
+# ── 8. Registry 只读副本（内部，无认证，供 UI 使用）─────────────────────────
+docker run -d \
+    --name registry-ro \
+    --network registry-net \
+    --restart always \
+    -p 127.0.0.1:5001:5001 \
+    -v registry-data:/var/lib/registry:ro \
+    -v "$CONFIG_RO_FILE":/etc/docker/registry/config.yml:ro \
+    registry:2
+echo "✓ Registry 只读副本已启动（127.0.0.1:5001，无认证）"
+
+# ── 9. Registry UI ───────────────────────────────────────────────────────────
 docker run -d \
     --name registry-ui \
     --network registry-net \
@@ -124,14 +154,13 @@ docker run -d \
     -p 127.0.0.1:5080:80 \
     -e SINGLE_REGISTRY=true \
     -e REGISTRY_TITLE="Private Registry" \
-    -e NGINX_PROXY_PASS_URL=http://registry:5000 \
+    -e NGINX_PROXY_PASS_URL=http://registry-ro:5001 \
     -e SHOW_CONTENT_DIGEST=true \
-    -e DELETE_IMAGES=true \
-    -e REGISTRY_SECURED=true \
+    -e DELETE_IMAGES=false \
     joxit/docker-registry-ui:latest
 echo "✓ Registry UI 已启动（127.0.0.1:5080）"
 
-# ── 9. Cloudflare Tunnel ─────────────────────────────────────────────────────
+# ── 10. Cloudflare Tunnel ────────────────────────────────────────────────────
 if [[ -n "$CF_TOKEN" ]]; then
     docker run -d \
         --name cloudflared \
@@ -142,7 +171,7 @@ if [[ -n "$CF_TOKEN" ]]; then
     echo "✓ Cloudflare Tunnel 已启动"
 fi
 
-# ── 10. 验证 ─────────────────────────────────────────────────────────────────
+# ── 11. 验证 ─────────────────────────────────────────────────────────────────
 sleep 2
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/v2/)
 if [ "$HTTP_CODE" = "401" ]; then
@@ -152,11 +181,20 @@ else
     exit 1
 fi
 
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5001/v2/)
+if [ "$HTTP_CODE" = "200" ]; then
+    echo "✓ Registry 只读副本返回 200（无认证访问正常）"
+else
+    echo "✖ Registry 只读副本响应异常（HTTP $HTTP_CODE）：docker logs registry-ro"
+    exit 1
+fi
+
 echo ""
 echo "=== 安装完成 ==="
 echo ""
 echo "  CF Tunnel 路由（请在 CF Dashboard 确认）："
-echo "    $REGISTRY_DOMAIN → http://localhost:5000"
+echo "    $REGISTRY_DOMAIN → http://localhost:5000  （对外，客户 docker login/pull）"
+echo "    UI 域名           → http://localhost:5080  （内部管理，建议开 CF Access）"
 echo ""
 echo "  客户登录命令："
 echo "    docker login $REGISTRY_DOMAIN -u license -p <LICENSE_KEY>"
