@@ -43,17 +43,17 @@ echo ""
 
 if [[ -n "$CF_TOKEN" ]]; then
     echo "→ 验证 CF Tunnel Token..."
-    docker rm -f _cf_test 2>/dev/null || true
-    docker run -d --name _cf_test --network host \
+    docker rm -f cf-test 2>/dev/null || true
+    docker run -d --name cf-test --network host \
         cloudflare/cloudflared:latest \
         tunnel --no-autoupdate run --token "$CF_TOKEN" >/dev/null
     sleep 6
-    if docker logs _cf_test 2>&1 | grep -q "Invalid tunnel secret\|not valid\|Unauthorized"; then
-        docker rm -f _cf_test >/dev/null
+    if docker logs cf-test 2>&1 | grep -q "Invalid tunnel secret\|not valid\|Unauthorized"; then
+        docker rm -f cf-test >/dev/null
         echo "✖ Token 无效，请到 CF Zero Trust → Tunnels 重新复制 token 后再运行此脚本"
         exit 1
     fi
-    docker rm -f _cf_test >/dev/null
+    docker rm -f cf-test >/dev/null
     echo "✓ Token 有效"
 fi
 
